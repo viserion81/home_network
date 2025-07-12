@@ -1,0 +1,257 @@
+# OPNsense Home Network Core Guide 🚀
+
+This guide provides a comprehensive walkthrough for building and documenting your home network core using OPNsense. It covers initial setup, VLAN creation, firewall rules, VPN configuration, and switch/AP setup.
+
+**Note:** This guide generalizes concepts for managed switches and access points based on common examples. Specific steps for your hardware (e.g., XikeStor switches, Orbi mesh systems) may require consulting the manufacturer's documentation.
+
+---
+
+## 1. Verify Public IPv4 and Enable Bridge-Mode on Vodafone Modem 🌐
+
+The first step is to configure your ISP modem to pass the public internet connection directly to your OPNsense router, avoiding issues like double NAT.
+
+**To verify public IPv4 and enable bridge-mode (or an equivalent feature):**
+
+* **Consult your Vodafone modem's manual:** The process for enabling "bridge mode" or a feature like "Advanced DMZ" is specific to your device model.
+* **DMZ Dance (if applicable):** Some modems require a specific sequence to enable DMZ properly. For example, you might need to log into the modem's admin page, navigate to **`Advance tools and settings`** > **`DMZ`**, turn the feature **OFF**, save, then turn it back **ON**, and save again.
+* **Connect OPNsense WAN:** Connect the WAN port of your OPNsense box to a LAN port on your Vodafone modem.
+
+#### Validation Test ✅
+
+* **Ping public IP from OPNsense WAN:** After setup, log into OPNsense and try to ping a public IP address like `9.9.9.9` from the WAN interface. If this works, but pinging a domain like `google.com` fails, you likely have a DNS configuration issue to resolve.
+
+---
+
+## 2. OPNsense Initial Setup, Firmware Update, and VLAN Creation ⚙️
+
+This section covers the core OPNsense installation and configuration.
+
+### 2.1. OPNsense Installation
+
+* **Download Image:** Go to the OPNsense download page and select the **"vga"** installer image.
+* **Flash USB:** Use a tool like [Etcher](https://www.balena.io/etcher/) to flash the downloaded image to a USB drive.
+* **Boot and Install:** Boot your OPNsense hardware (e.g., ODROID H4+) from the USB drive.
+    * When prompted for a configuration import, **do not press any key**.
+    * You can assign interfaces manually now or let it proceed automatically. It's often easier to configure LAGG and VLANs later in the web interface.
+    * Enter the physical interface names when prompted (e.g., `igc0` for WAN, `igc1` for LAN).
+    * At the login prompt, use the username `installer` and password `opnsense`.
+    * Select the **"Install (ZFS)"** option, which is recommended for resiliency.
+    * Choose your target disk and confirm the installation.
+    * **Change the root password** when prompted.
+    * Select **"Complete Install,"** reboot, and remove the USB drive.
+
+### 2.2. Initial Wizard and Firmware Update
+
+* **Access Web GUI:** Connect a computer to the OPNsense LAN port. Open a browser and navigate to `https://192.168.1.1`.
+* **Skip Wizard (Optional):** You can skip the initial setup wizard by clicking the OPNsense logo. This encourages learning where settings are located.
+* **Basic System Configuration (`System > Settings > General`):**
+    * Set a **Hostname** (e.g., `router`) and **Domain** (e.g., `home.arpa`).
+    * Set your **Time zone**.
+    * Leave **DNS Servers** blank and check **"Allow DNS server list to be overridden by DHCP/PPP on WAN"** to use your ISP's DNS for router updates.
+    * Optionally install a theme via `System > Firmware > Plugins` (e.g., `os-theme-cicada`).
+* **Firmware Update (`System > Firmware > Status`):**
+    * Check for and install any available updates. Reboot if required.
+* **Optional Drivers:**
+    * If your 2.5GbE Realtek NICs have issues, install the driver from `System > Firmware > Plugins`.
+    * For other hardware like Mellanox cards, enable the driver via `System > Settings > Tunables` (e.g., set `mlx4_load` to `yes`).
+
+### 2.3. Interface Assignments
+
+* **Disable Hardware Offloading (`Interfaces > Settings`):**
+    * It's highly recommended to **disable** "Hardware checksum offload," "Hardware TCP segmentation offload," and "Hardware large receive offload." These are often incompatible with services like Suricata or Zenarmor.
+* **WAN Interface (`Interfaces > [WAN]`):**
+    * Ensure **Enable Interface** is checked.
+    * Check **"Prevent interface removal"**.
+    * **Block private/bogon networks:** Keep these checked.
+    * **IPv4 Configuration Type:** Set to **DHCP**.
+    * **IPv6 Configuration Type:** Set to **DHCPv6** if your ISP supports it.
+* **LAN Interface (`Interfaces > [LAN]`):**
+    * Ensure **Enable Interface** is checked.
+    * Check **"Prevent interface removal"**.
+    * **Block private/bogon networks:** Uncheck for internal networks.
+    * **IPv4 Configuration Type:** Set to **Static IPv4** with an address like `192.168.1.1/24`.
+    * **IPv6 Configuration Type:** Set to **Track Interface**.
+
+### 2.4. Optional LAGG (Link Aggregation Groups)
+
+LAGGs combine multiple physical links for redundancy or increased throughput. For most home networks, especially with 2.5GbE or faster links, LAGGs are **unnecessary** and can add complexity. They are best skipped unless you have a specific, identified bottleneck.
+
+### 2.5. Creation of Four VLANs (1 LAN, 20 IoT, 40 Servers, 99 Mgmt)
+
+VLANs (Virtual LANs) segment your network for improved security and organization.
+
+* **Create VLANs (`Interfaces > Other Types > VLAN`):**
+    * Click **"+"** to add a new VLAN.
+    * **Parent:** Select your primary LAN interface (e.g., `igc1`).
+    * **VLAN Tag:** Enter the numeric ID (e.g., `20`, `40`, `99`).
+    * **Description:** Give it a descriptive name (e.g., `IOT`, `SERVERS`, `MGMT`).
+    * Repeat for all VLANs. Save and **Apply changes**.
+* **Assign VLANs to Interfaces (`Interfaces > Assignments`):**
+    * From the "New interface" dropdown, select one of your newly created VLANs.
+    * Give it a description (this will be its name in the OPNsense UI).
+    * Click **"+"** to add it. Repeat for all VLANs and **Save**.
+* **Configure VLAN Interfaces (`Interfaces > [VLAN Name]`):**
+    * For each new VLAN interface (e.g., `IOT`, `SERVERS`):
+        * **Enable Interface** and **Prevent interface removal**.
+        * **IPv4 Configuration Type:** **Static IPv4**.
+        * **IPv4 Address:** Assign a unique subnet. A common practice is to match the VLAN ID (e.g., `192.168.20.1/24` for VLAN 20, `192.168.40.1/24` for VLAN 40).
+        * **IPv6 Configuration Type:** **Track Interface**. Assign a unique **Prefix ID** for each.
+        * **Save** and **Apply Changes**.
+
+#### Validation Test ✅
+
+* Go to `Interfaces > Overview` to verify all interfaces have the correct IP addresses.
+* From a computer connected to the LAN, try to ping the gateway IP of each VLAN (e.g., `ping 192.168.20.1`, `ping 192.168.40.1`). This confirms OPNsense is routing between them.
+
+---
+
+## 3. Per-VLAN DHCP, Unbound DNS, and Firewall Rules 🛡️
+
+This section configures automatic IP assignment, local DNS, and the firewall rules to enforce your network segmentation.
+
+### 3.1. Per-VLAN DHCP Scopes
+
+For each VLAN interface (`LAN`, `IOT`, etc.), go to `Services > DHCPv4 > [VLAN Name]`.
+
+* **Enable** the DHCP server for the interface.
+* **Range:** Define an IP range for clients (e.g., `192.168.20.100` to `192.168.20.200`). Leave space for static IPs.
+* **Save**.
+* Optionally configure DHCPv6 under `Services > DHCPv6 > [VLAN Name]` and router advertisements under `Services > Router Advertisements > [VLAN Name]`, typically using **"Assisted"** mode for best compatibility.
+
+#### Validation Test ✅
+
+* Connect a device to each VLAN (you'll do this via the switch later) and verify it gets an IP address from the correct DHCP range.
+
+### 3.2. Unbound Split-Horizon DNS
+
+Unbound DNS provides local name resolution, DNS-over-TLS for privacy, and ad-blocking.
+
+* **General Settings (`Services > Unbound DNS > General`):**
+    * Ensure **Enable Unbound** is checked.
+    * Check **Register DHCP leases** and **Register DHCP static mappings**.
+* **DNS over TLS (`Services > Unbound DNS > DNS over TLS`):** (Optional)
+    * Add servers for encrypted DNS queries (e.g., Quad9: `9.9.9.9` on port `853` with CN `dns.quad9.net`).
+* **Blocklists (`Services > Unbound DNS > Blocklist`):**
+    * Enable and select blocklists (e.g., OISD, StevenBlack) for network-wide ad-blocking.
+* **Overrides (`Services > Unbound DNS > Overrides`):**
+    * Add entries for your local services (e.g., Host: `nas`, Domain: `home.arpa`, IP: `192.168.40.10`) to create local DNS records.
+* **Apply changes** when done.
+
+#### Validation Test ✅
+
+* From a client, use `nslookup google.com` to test resolution. Ping `google.com` to confirm internet access. Test a known ad domain to ensure it's blocked (resolves to `0.0.0.0`).
+
+### 3.3. Firewall Rules
+
+Rules enforce your security policy. Rules are processed top-down; the first match wins. The default is to deny all traffic that isn't explicitly allowed.
+
+* **Create a Private Networks Alias (`Firewall > Aliases`):**
+    * Create an alias named `PrivateNetworks` of type `Network(s)`.
+    * Add the private ranges: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`.
+* **General Rule for Isolated VLANs (e.g., `IOT`, `GUEST`):**
+    On the firewall tab for the VLAN (`Firewall > Rules > IOT`), create two rules:
+    1.  **Allow DNS to Router:**
+        * **Action:** `Pass`
+        * **Protocol:** `TCP/UDP`
+        * **Source:** `IOT net`
+        * **Destination:** `IOT address`
+        * **Destination Port:** `DNS` (53)
+        * **Description:** `Allow DNS to OPNsense`
+    2.  **Allow Internet, Block Local:**
+        * **Action:** `Pass`
+        * **Protocol:** `any`
+        * **Source:** `IOT net`
+        * **Destination:** `PrivateNetworks`
+        * **Destination / Invert:** **Check this box** (This means "anywhere EXCEPT private networks").
+        * **Description:** `Allow Internet, Block LANs`
+* **Configure Rules for Other VLANs:**
+    * **LAN:** Apply the same two rules as above. You can add more specific `Pass` rules if LAN needs to access devices on other VLANs (e.g., servers).
+    * **SERVERS:** Apply the two basic rules. Add specific `Pass` rules on the `LAN` interface to allow access *to* the servers from your trusted devices.
+    * **MGMT:** Apply the two basic rules. Add a rule to allow access to the OPNsense WebUI and SSH from the MGMT network (`Destination: MGMT address`, `Port: 443, 22`).
+* **Apply changes** after setting rules for each interface.
+
+#### Validation Test ✅
+
+* From a device on the IOT network, try to ping a device on the LAN. It should fail.
+* Verify devices on all VLANs can still ping `google.com`.
+* Check `Firewall > Log Files > Live View` to see traffic being passed and blocked as expected.
+
+---
+
+## 4. WireGuard VPN and Port Forwarding 🛡️
+
+This section covers setting up secure remote access via WireGuard and preparing to expose web services.
+
+### 4.1. WireGuard “Road-Warrior” Setup
+
+* **Configure WireGuard Instance (`VPN > WireGuard > Instances`):**
+    * Add a new instance. Give it a name, generate keys, and set a **Tunnel Address** (e.g., `10.10.10.1/24`).
+* **Configure Client Peer (`VPN > WireGuard > Peers`):**
+    * Add a new peer for each client device (e.g., `MyPhone`).
+    * Paste the **Public Key** from the client app.
+    * Set **Allowed IPs** to the client's tunnel IP (e.g., `10.10.10.2/32`).
+* **Enable and Assign:**
+    * Enable WireGuard under `VPN > WireGuard > General`.
+    * Assign the WireGuard instance to a new Interface under `Interfaces > Assignments`.
+    * Add a firewall rule on the **WAN** interface to `Pass` UDP traffic on your WireGuard port (e.g., `51820`) to the `WAN address`.
+    * Add a firewall rule on the new **WireGuard interface** to `Pass` all traffic from the `WireGuard net` to allow VPN clients to access your internal networks.
+
+### 4.2. NAT 80/443 to Future Reverse-Proxy Host
+
+Use port forwarding to direct incoming web traffic to an internal server running a reverse proxy (like Nginx Proxy Manager).
+
+* **Configure Port Forwarding (`Firewall > NAT > Port Forward`):**
+    * Click **Add** to create a new rule.
+    * **Interface:** `WAN`
+    * **Protocol:** `TCP`
+    * **Destination:** `WAN address`
+    * **Destination port range:** `HTTP` (80)
+    * **Redirect target IP:** The static IP of your reverse proxy server (e.g., `192.168.40.50`).
+    * **Redirect target port:** `HTTP` (80)
+    * **Filter rule association:** Select **"Add associated filter rule"**.
+    * **Save**. Repeat the process for `HTTPS` (443).
+
+---
+
+## 5. Switch Configuration (XikeStor Managed 2.5 Gb Switch) 🔌
+
+Your managed switch must be configured to understand VLANs. The key concepts are "tagged" and "untagged" ports.
+
+* **Initial Switch Setup:**
+    * Connect a PC directly to the switch.
+    * Access the switch's web UI using its default IP (check the manual).
+    * Change the switch's IP to a static IP on your **LAN network** (e.g., `192.168.1.2`) and set its gateway to your OPNsense LAN IP (`192.168.1.1`).
+    * **Crucially, save the running configuration to make it permanent.**
+* **VLAN Configuration (802.1Q VLAN Settings):**
+    * **Create VLANs:** In the switch UI, create entries for VLANs 20, 40, and 99.
+    * **Configure the Trunk Port:** The port connecting to your OPNsense router is the "trunk."
+        * This port must be a **Tagged** member of **all** your VLANs (1, 20, 40, 99).
+        * The PVID (Port VLAN ID) for this port should be `1` (for the default/native LAN).
+    * **Configure Access Ports:** These are ports for end-devices.
+        * A port for a server should be an **Untagged** member of VLAN 40, with a PVID of `40`.
+        * A port for a wired IoT device should be an **Untagged** member of VLAN 20, with a PVID of `20`.
+        * An untagged port can only belong to one VLAN.
+
+#### Validation Test ✅
+
+* Plug a laptop into a port configured for the SERVERS VLAN (untagged, PVID 40). Verify it gets an IP in the `192.168.40.x` range. Test internet access. Repeat for other VLANs.
+
+---
+
+## 6. Orbi Reconfiguration to Pure AP with VLANs 📡
+
+Your Orbi mesh system must be switched to Access Point (AP) mode so OPNsense handles all routing.
+
+* **Connect Orbi to Switch:** Plug the Orbi's WAN port into a **Tagged Trunk Port** on your switch (the same configuration as the port going to OPNsense).
+* **Find Orbi's IP:** After connecting it, look in the OPNsense DHCP Leases (`Services > DHCPv4 > Leases`) to find the IP address your Orbi received on the LAN network.
+* **Access Orbi Web Interface:** Log into the Orbi's admin page using its new IP.
+* **Reconfigure to AP Mode:**
+    * Find the setting to change the operational mode to **"Access Point Mode"**. This disables its router and DHCP functions.
+    * Confirm that DHCP is disabled on the Orbi itself.
+* **Create SSIDs and Assign VLANs:**
+    * In the wireless settings, create separate SSIDs for your networks (e.g., "Home", "IoT", "Guest").
+    * For each SSID, there should be an option to assign a **VLAN ID**.
+        * **Home SSID:** Assign to VLAN `1` (or leave untagged if that's the default).
+        * **IoT SSID:** Assign to VLAN `20`.
+        * **Guest SSID:** Assign to a Guest VLAN (e.g., VLAN `30`, if you create one).
+    * Save your settings. Devices connecting to each SSID will now automatically be placed on the corresponding VLAN and get an IP address from OPNsense.
